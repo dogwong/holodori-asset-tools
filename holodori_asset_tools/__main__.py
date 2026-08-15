@@ -45,6 +45,7 @@ def main() -> int:
     p = sub.add_parser("extract", help="extract a decrypted asset file or directory")
     p.add_argument("indir")
     p.add_argument("outdir")
+    p.add_argument("--workers", type=int, default=0, help="0 = cpu_count")
 
     args = parser.parse_args()
     if args.command == "decrypt":

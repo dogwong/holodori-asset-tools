@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from logging import getLogger
+from os import cpu_count
 from pathlib import Path
 from typing import Union
 
@@ -139,6 +141,27 @@ def _extract_one(src: Path, outdir: Path) -> set[Path]:
     return _copy(src, outdir)
 
 
+def _extract_job(src: Path, outdir: Path) -> tuple[str, int, str | None]:
+    try:
+        return src.name, len(_extract_one(src, outdir)), None
+    except Exception as e:
+        return src.name, 0, str(e)
+
+
+def extract_many(files: list[Path], outdir: Path, workers: int = 0) -> None:
+    if not files:
+        return
+    n = workers if workers > 0 else (cpu_count() or 4)
+    with ProcessPoolExecutor(max_workers=n) as pool:
+        futs = [pool.submit(_extract_job, src, outdir) for src in files]
+        for fut in as_completed(futs):
+            name, count, err = fut.result()
+            if err:
+                logger.error("%s failed: %s", name, err)
+            else:
+                logger.info("%s -> %d files", name, count)
+
+
 def main(args: argparse.Namespace) -> int:
     indir, outdir = Path(args.indir), Path(args.outdir)
     files = (
@@ -146,10 +169,11 @@ def main(args: argparse.Namespace) -> int:
         if indir.is_file()
         else sorted(p for p in indir.rglob("*") if p.is_file())
     )
-    for src in files:
-        try:
-            created = _extract_one(src, outdir)
-            logger.info("%s -> %d files", src.name, len(created))
-        except Exception as e:
-            logger.error("%s failed: %s", src.name, e)
+    extract_many(files, outdir, args.workers)
     return 0
+
+
+if __name__ == "__main__":
+    name, n, err = _extract_job(Path("_missing_no_such_file"), Path("."))
+    assert err and n == 0 and name == "_missing_no_such_file"
+    extract_many([], Path("."))
