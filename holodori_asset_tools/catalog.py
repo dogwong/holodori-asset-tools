@@ -13,7 +13,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 logger = getLogger("catalog")
 
-APPVER_URL = "https://raw.githubusercontent.com/HolodoriDB/holodori-app-protos/refs/heads/main/global/appver.json"
+PLATFORMS = ["global", "jp"]
+APPVER_URL = "https://raw.githubusercontent.com/HolodoriDB/holodori-app-protos/refs/heads/main/{plat}/appver.json"
 OCTO_API_KEY = "B46OtKlGGHoz6sxbOWDe3VUvBsagXxr5av38IQIKUKo="
 OCTO_CLIENT_KEY = "CwFhQ+S5m4nERWVaq5oFZIP0cZLc0j7O/zllG0UYVNo="
 OCTO_LIST_URL = (
@@ -21,17 +22,44 @@ OCTO_LIST_URL = (
 )
 
 
+def _ver_key(name: object) -> tuple[int, ...]:
+    # "1.1.0" vs "1.0.101" -> (1,1,0) vs (1,0,101); non-numeric parts sort as 0
+    parts = []
+    for p in str(name or "").split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
 @lru_cache(maxsize=1)
 def appver(url: str = APPVER_URL) -> dict:
-    try:
-        return httpx.get(url, timeout=30).json()
-    except Exception as e:
-        logger.warning("appver fetch failed (%s); using bundled keys", e)
-        return {
-            "version_name": "",
-            "android_octo_key": OCTO_API_KEY,
-            "android_app_octo_key": OCTO_CLIENT_KEY,
-        }
+    # ensure latest - jp/global may update at separate times and sometimes only one will be picked up by auto-update
+    # check both to get latest on either
+    urls = (
+        [url.format(plat=p) for p in PLATFORMS] if "{plat}" in url else [url]
+    )
+    best: Optional[dict] = None
+    for u in urls:
+        try:
+            info = httpx.get(u, timeout=30).json()
+        except Exception as e:
+            logger.warning("appver fetch failed (%s): %s", u, e)
+            continue
+        if best is None or _ver_key(info.get("version_name")) > _ver_key(
+            best.get("version_name")
+        ):
+            best = info
+    if best is not None:
+        logger.info("appver: using %s", best.get("version_name") or "?")
+        return best
+    logger.warning("appver: all platforms failed; using bundled keys")
+    return {
+        "version_name": "",
+        "android_octo_key": OCTO_API_KEY,
+        "android_app_octo_key": OCTO_CLIENT_KEY,
+    }
 
 
 @dataclass
