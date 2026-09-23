@@ -35,10 +35,13 @@ Each assetbundle and each ACB/AWB/USM resource also gets an `extracted.zip` link
 asset plus every bundle it requires (per the octo dependency list), extracts them, and returns the
 result as `extracted_{name}.zip`. The size shown next to the link is the total download it needs.
 
-Assets live under two flat groups, `assetbundles/` and `resources/`. `download` and
-`serve` pull the octo catalog (caching it to `--catalog`), fetch from the CDN and
-decrypt on the fly. `decrypt`/`encrypt` operate on local files and key the header
-mask on each file's name, so files must be named by their asset name.
+Assets live under `assetbundles/` and `resources/`, grouped by the first `_`
+prefix of each file name (`adv_anime_...` → `assetbundles/adv/`). Names with no
+`_` go in `_/`. `extract` mirrors that layout under the output directory.
+`download` and `serve` pull the octo catalog (caching it to `--catalog`), fetch
+from the CDN and decrypt on the fly. `decrypt`/`encrypt` operate on local files
+and key the header mask on each file's name, so files must be named by their
+asset name.
 
 `decrypt`, `encrypt` and `extract` accept either a single file or a directory as
 their input.

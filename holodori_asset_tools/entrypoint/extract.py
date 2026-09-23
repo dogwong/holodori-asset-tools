@@ -11,6 +11,7 @@ from typing import Union
 import cricodecs
 
 from .. import crypto
+from . import asset_bucket, kind_rel
 
 logger = getLogger("extract")
 
@@ -153,7 +154,7 @@ def extract_many(files: list[Path], outdir: Path, workers: int = 0) -> None:
         return
     n = workers if workers > 0 else (cpu_count() or 4)
     with ProcessPoolExecutor(max_workers=n) as pool:
-        futs = [pool.submit(_extract_job, src, outdir) for src in files]
+        futs = [pool.submit(_extract_job, src, outdir / kind_rel(src)) for src in files]
         for fut in as_completed(futs):
             name, count, err = fut.result()
             if err:
@@ -177,3 +178,12 @@ if __name__ == "__main__":
     name, n, err = _extract_job(Path("_missing_no_such_file"), Path("."))
     assert err and n == 0 and name == "_missing_no_such_file"
     extract_many([], Path("."))
+    assert asset_bucket("adv_anime_01_01_01-01") == "adv"
+    assert asset_bucket("VisionProject.acf") == "_"
+    assert kind_rel(Path("assets/assetbundles/adv/adv_anime_01_01_01-01")) == Path(
+        "assetbundles", "adv"
+    )
+    assert kind_rel(Path("assets/assetbundles/adv_anime_01_01_01-01")) == Path(
+        "assetbundles", "adv"
+    )
+    assert kind_rel(Path("lonely_file")) == Path("lonely")

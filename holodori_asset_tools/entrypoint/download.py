@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from .. import catalog, crypto
 from ..catalog import Entry
+from . import asset_rel
 
 logger = getLogger("download")
 
@@ -34,7 +35,7 @@ def main(args: argparse.Namespace) -> int:
         for entry in entries:
             if pattern and not pattern.search(entry.name):
                 continue
-            dest = outdir / kind / entry.name
+            dest = outdir / asset_rel(kind, entry.name)
             if args.no_overwrite and dest.exists():
                 continue
             jobs.append((dest, entry))
