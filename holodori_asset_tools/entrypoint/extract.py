@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from logging import getLogger
 from os import cpu_count
 from pathlib import Path
@@ -149,18 +150,67 @@ def _extract_job(src: Path, outdir: Path) -> tuple[str, int, str | None]:
         return src.name, 0, str(e)
 
 
-def extract_many(files: list[Path], outdir: Path, workers: int = 0) -> None:
+def _log_extract(name: str, count: int, err: str | None) -> None:
+    if err:
+        logger.error("%s failed: %s", name, err)
+    else:
+        logger.info("%s -> %d files", name, count)
+
+
+def _consume(files: list[Path], outdir: Path, workers: int) -> tuple[set[Path], bool]:
+    done: set[Path] = set()
     if not files:
-        return
+        return done, False
     n = workers if workers > 0 else (cpu_count() or 4)
-    with ProcessPoolExecutor(max_workers=n) as pool:
-        futs = [pool.submit(_extract_job, src, outdir / kind_rel(src)) for src in files]
-        for fut in as_completed(futs):
-            name, count, err = fut.result()
-            if err:
-                logger.error("%s failed: %s", name, err)
-            else:
-                logger.info("%s -> %d files", name, count)
+    pool = ProcessPoolExecutor(max_workers=min(n, len(files)))
+    broken = False
+    futs = {
+        pool.submit(_extract_job, src, outdir / kind_rel(src)): src for src in files
+    }
+    try:
+        try:
+            for fut in as_completed(futs):
+                src = futs[fut]
+                try:
+                    name, count, err = fut.result()
+                except BrokenProcessPool:
+                    broken = True
+                    break
+                done.add(src)
+                _log_extract(name, count, err)
+        except BrokenProcessPool:
+            broken = True
+        for fut, src in futs.items():
+            if src in done or not fut.done():
+                continue
+            try:
+                name, count, err = fut.result(timeout=0)
+            except Exception:
+                continue
+            done.add(src)
+            _log_extract(name, count, err)
+    finally:
+        try:
+            pool.shutdown(wait=not broken, cancel_futures=broken)
+        except Exception:
+            pass
+    return done, broken
+
+
+def extract_many(files: list[Path], outdir: Path, workers: int = 0) -> None:
+    pending = list(files)
+    if not pending:
+        return
+    done, broken = _consume(pending, outdir, workers)
+    if not broken:
+        return
+    # ponytail: after one killed worker, the rest run one at a time
+    pending = [src for src in pending if src not in done]
+    logger.error("worker killed; retrying %d file(s) one at a time", len(pending))
+    for src in pending:
+        _, one_broken = _consume([src], outdir, 1)
+        if one_broken:
+            logger.error("%s killed the worker; skipped", src.name)
 
 
 def main(args: argparse.Namespace) -> int:
