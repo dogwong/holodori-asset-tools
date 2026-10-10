@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Union
 
 import cricodecs
+from ..image_sizes import image_for_export, sprite_for_export, image_output_paths, texture_canvas_sizes, texture_image
+from PIL import Image
 
 from .. import crypto
 from . import asset_bucket, kind_rel
@@ -19,6 +21,119 @@ logger = getLogger("extract")
 UNITY_VERSION = "6000.3.15f1"
 
 _KEEP = ("Sprite", "Texture2D", "TextAsset", "MonoBehaviour", "AnimationClip")
+
+
+def _asset_name(data, path_id: int) -> str:
+    return getattr(data, "m_Name", None) or str(path_id)
+
+
+def _claim_stem(used: set[str], name: str, path_id: int, suffixes: tuple[str, ...]) -> str:
+    base = name or str(path_id)
+    n = 0
+    while True:
+        stem = base if n == 0 else f"{base}__{path_id}" if n == 1 else f"{base}__{path_id}_{n - 1}"
+        filenames = [f"{stem}{suffix}" for suffix in suffixes]
+        if all(filename not in used for filename in filenames):
+            used.update(filenames)
+            return stem
+        n += 1
+
+
+def _claim(out: Path, used: set[str], name: str, path_id: int, suffix: str) -> Path:
+    dest = out / f"{_claim_stem(used, name, path_id, (suffix,))}{suffix}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def _num(value):
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    return value
+
+
+def _vec3(value) -> list | None:
+    if value is None:
+        return None
+    return [_num(value.x), _num(value.y), _num(value.z)]
+
+
+def _matrix(value) -> list:
+    return [_num(getattr(value, f"e{row}{col}")) for row in range(4) for col in range(4)]
+
+
+def _rows(rows) -> list:
+    if not rows:
+        return []
+    return [[_num(item) for item in row] for row in rows]
+
+
+def _blend_shapes(shapes) -> dict:
+    if not shapes:
+        return {"channels": [], "shapes": [], "fullWeights": [], "vertices": []}
+    return {
+        "channels": [
+            {
+                "name": channel.name,
+                "nameHash": _num(channel.nameHash),
+                "frameIndex": _num(channel.frameIndex),
+                "frameCount": _num(channel.frameCount),
+            }
+            for channel in (shapes.channels or [])
+        ],
+        "shapes": [
+            {
+                "firstVertex": _num(shape.firstVertex),
+                "vertexCount": _num(shape.vertexCount),
+                "hasNormals": bool(shape.hasNormals),
+                "hasTangents": bool(shape.hasTangents),
+            }
+            for shape in (shapes.shapes or [])
+        ],
+        "fullWeights": [_num(weight) for weight in (shapes.fullWeights or [])],
+        "vertices": [
+            {
+                "index": _num(vertex.index),
+                "vertex": _vec3(vertex.vertex),
+                "normal": _vec3(vertex.normal),
+                "tangent": _vec3(vertex.tangent),
+            }
+            for vertex in (shapes.vertices or [])
+        ],
+    }
+
+
+def _mesh_skin(mesh) -> dict:
+    from UnityPy.helpers.MeshHelper import MeshHandler
+
+    handler = MeshHandler(mesh)
+    handler.process()
+    return {
+        "bindPoses": [_matrix(pose) for pose in (mesh.m_BindPose or [])],
+        "boneNameHashes": [_num(item) for item in (mesh.m_BoneNameHashes or [])],
+        "boneWeights": _rows(handler.m_BoneWeights),
+        "boneIndices": _rows(handler.m_BoneIndices),
+        "blendShapes": _blend_shapes(mesh.m_Shapes),
+    }
+
+
+def _shader_text(shader) -> str | None:
+    try:
+        text = shader.export()
+    except Exception:
+        return None
+    if not isinstance(text, str) or not text:
+        return None
+    return text
+
+
+def _write_json(dest: Path, data) -> None:
+    dest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
 def _unitypy():
@@ -40,38 +155,68 @@ class AssetBundle:
     def load(self):
         return _unitypy().load(crypto.decrypt(self.path.read_bytes(), self.name))
 
-    def extract(self, outdir: Union[str, Path]) -> set[Path]:
+    def extract(self, outdir: Union[str, Path], images_only: bool = False) -> set[Path]:
         env = self.load()
         out = Path(outdir) / self.name
-        objects = [o for o in env.objects if o.type.name in _KEEP]
-        data = {o.path_id: o.read() for o in objects}
-        sprites = {
-            d.m_Name for o, d in zip(objects, data.values()) if o.type.name == "Sprite"
-        }
+        keep = ("Sprite", "Texture2D") if images_only else _KEEP
+        objects = [(o, o.read()) for o in env.objects if o.type.name in keep]
+        sprites = {(id(o.assets_file), d.m_Name) for o, d in objects if o.type.name == "Sprite"}
+        objects = [(o, d) for o, d in objects if not (
+            o.type.name == "Texture2D" and (id(o.assets_file), d.m_Name) in sprites)]
+        # Runtime-created font atlases have no pixels and cannot be saved as PNG.
+        objects = [(o, d) for o, d in objects if not (
+            o.type.name == "Texture2D" and (d.m_Width <= 0 or d.m_Height <= 0))]
+        image_paths = image_output_paths([
+            dict(serialized_file=o.assets_file.name, id=o.path_id, name=d.m_Name,
+                 size=(d.m_Width, d.m_Height) if o.type.name == "Texture2D" else (d.m_Rect.width, d.m_Rect.height))
+            for o, d in objects if o.type.name in ("Sprite", "Texture2D")])
+        canvases = texture_canvas_sizes(env) if image_paths else {}
         created: set[Path] = set()
-        for obj in objects:
-            d = data[obj.path_id]
-            if obj.type.name == "Texture2D" and d.m_Name in sprites:
-                continue
-            dest = out / (d.m_Name or str(obj.path_id))
-            dest.parent.mkdir(parents=True, exist_ok=True)
+        used = {path.name for path in image_paths.values()}
+        for obj, d in objects:
+            name = _asset_name(d, obj.path_id)
             if obj.type.name in ("Sprite", "Texture2D"):
-                dest = dest.with_suffix(".png")
-                d.image.save(dest)
+                dest = out / image_paths[(obj.assets_file.name, obj.path_id)]
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                image = sprite_for_export(d) if obj.type.name == "Sprite" else image_for_export("Texture2D", d.m_Name, texture_image(d))
+                canvas = canvases.get((obj.assets_file.name, obj.path_id))
+                if obj.type.name == "Texture2D" and canvas and image.size != canvas:
+                    image = d.image.resize(canvas, Image.Resampling.LANCZOS)
+                image.save(dest)
+                created.add(dest)
             elif obj.type.name == "TextAsset":
+                dest = _claim(out, used, name, obj.path_id, "")
                 script = d.m_Script
                 dest.write_bytes(
                     script.encode("utf-8", "surrogateescape")
                     if isinstance(script, str)
                     else bytes(script)
                 )
+                created.add(dest)
+            elif obj.type.name == "Mesh":
+                stem = _claim_stem(used, name, obj.path_id, (".obj", ".skin.json"))
+                obj_path = out / f"{stem}.obj"
+                skin_path = out / f"{stem}.skin.json"
+                obj_path.parent.mkdir(parents=True, exist_ok=True)
+                text = d.export()
+                if isinstance(text, str) and text:
+                    obj_path.write_text(text, encoding="utf-8", newline="")
+                    created.add(obj_path)
+                _write_json(skin_path, _mesh_skin(d))
+                created.add(skin_path)
+            elif obj.type.name == "Shader":
+                text = _shader_text(d)
+                if text is None:
+                    dest = _claim(out, used, name, obj.path_id, ".json")
+                    _write_json(dest, obj.read_typetree())
+                else:
+                    dest = _claim(out, used, name, obj.path_id, ".shader")
+                    dest.write_text(text, encoding="utf-8", newline="")
+                created.add(dest)
             else:
-                dest = dest.with_suffix(".json")
-                dest.write_text(
-                    json.dumps(obj.read_typetree(), ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            created.add(dest)
+                dest = _claim(out, used, name, obj.path_id, ".json")
+                _write_json(dest, obj.read_typetree())
+                created.add(dest)
         return created
 
 
@@ -128,8 +273,10 @@ def _copy(src: Path, outdir: Path) -> set[Path]:
     return {dest}
 
 
-def _extract_one(src: Path, outdir: Path) -> set[Path]:
+def _extract_one(src: Path, outdir: Path, images_only: bool = False) -> set[Path]:
     ext = src.suffix.lower()
+    if images_only:
+        return AssetBundle(src, src.name).extract(outdir, images_only=True)
     if ext == ".acb":
         return _extract_acb(src, outdir)
     if ext == ".usm":
@@ -143,9 +290,9 @@ def _extract_one(src: Path, outdir: Path) -> set[Path]:
     return _copy(src, outdir)
 
 
-def _extract_job(src: Path, outdir: Path) -> tuple[str, int, str | None]:
+def _extract_job(src: Path, outdir: Path, images_only: bool = False) -> tuple[str, int, str | None]:
     try:
-        return src.name, len(_extract_one(src, outdir)), None
+        return src.name, len(_extract_one(src, outdir, images_only)), None
     except Exception as e:
         return src.name, 0, str(e)
 
@@ -157,7 +304,7 @@ def _log_extract(name: str, count: int, err: str | None) -> None:
         logger.info("%s -> %d files", name, count)
 
 
-def _consume(files: list[Path], outdir: Path, workers: int) -> tuple[set[Path], bool]:
+def _consume(files: list[Path], outdir: Path, workers: int, images_only: bool = False) -> tuple[set[Path], bool]:
     done: set[Path] = set()
     if not files:
         return done, False
@@ -165,7 +312,7 @@ def _consume(files: list[Path], outdir: Path, workers: int) -> tuple[set[Path], 
     pool = ProcessPoolExecutor(max_workers=min(n, len(files)))
     broken = False
     futs = {
-        pool.submit(_extract_job, src, outdir / kind_rel(src)): src for src in files
+        pool.submit(_extract_job, src, outdir / kind_rel(src), images_only): src for src in files
     }
     try:
         try:
@@ -197,18 +344,18 @@ def _consume(files: list[Path], outdir: Path, workers: int) -> tuple[set[Path], 
     return done, broken
 
 
-def extract_many(files: list[Path], outdir: Path, workers: int = 0) -> None:
+def extract_many(files: list[Path], outdir: Path, workers: int = 0, *, images_only: bool = False) -> None:
     pending = list(files)
     if not pending:
         return
-    done, broken = _consume(pending, outdir, workers)
+    done, broken = _consume(pending, outdir, workers, images_only)
     if not broken:
         return
     # ponytail: after one killed worker, the rest run one at a time
     pending = [src for src in pending if src not in done]
     logger.error("worker killed; retrying %d file(s) one at a time", len(pending))
     for src in pending:
-        _, one_broken = _consume([src], outdir, 1)
+        _, one_broken = _consume([src], outdir, 1, images_only)
         if one_broken:
             logger.error("%s killed the worker; skipped", src.name)
 

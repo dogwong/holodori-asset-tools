@@ -51,6 +51,16 @@ their input.
 - ACB/AWB files (**note: some ACB files rely on a separate AWB file - to extract those both files need to be downloaded**)
 - USM files (*extracted as .ivf files, convert to mp4/mov with a converter like ffmpeg or online converter - TODO convert*)
 
+Image export restores Sprite logical canvases, including atlas scaling and trimmed
+transparent margins. Explicit bundle canvas metadata takes priority for textures;
+32 UI category rules cover cards, MV slides, banners, emblems and other images.
+Full cards use the 1920x1080 UI reference canvas. Aspect-only rules preserve the
+source's longest dimension. Unverified textures retain native dimensions.
+These UI references do not establish original artwork resolution.
+See [the current image export policy](docs/image-export-policy.md) for the complete
+table, evidence, limitations, offline rebuild and verification commands.
+`tools/inspect_image_sizes.py` can export unresized native images.
+
 Octo keys and app versions are fetched from our repository [here](https://github.com/HolodoriDB/holodori-app-protos/tree/main).
 
 The library is usable directly:
