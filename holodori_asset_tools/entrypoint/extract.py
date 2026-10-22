@@ -20,7 +20,25 @@ logger = getLogger("extract")
 
 UNITY_VERSION = "6000.3.15f1"
 
-_KEEP = ("Sprite", "Texture2D", "TextAsset", "MonoBehaviour", "AnimationClip")
+_KEEP = (
+    "Sprite",
+    "Texture2D",
+    "TextAsset",
+    "MonoBehaviour",
+    "AnimationClip",
+    "Mesh",
+    "SkinnedMeshRenderer",
+    "MeshRenderer",
+    "MeshFilter",
+    "LODGroup",
+    "Transform",
+    "GameObject",
+    "Material",
+    "Shader",
+    "Avatar",
+    "AnimatorController",
+    "AnimatorOverrideController",
+)
 
 
 def _asset_name(data, path_id: int) -> str:
@@ -304,16 +322,25 @@ def _log_extract(name: str, count: int, err: str | None) -> None:
         logger.info("%s -> %d files", name, count)
 
 
-def _consume(files: list[Path], outdir: Path, workers: int, images_only: bool = False) -> tuple[set[Path], bool]:
+def _consume(
+    files: list[Path], outdir: Path, workers: int, images_only: bool = False
+) -> tuple[set[Path], bool, list[tuple[Path, int, str | None]]]:
     done: set[Path] = set()
+    results: list[tuple[Path, int, str | None]] = []
     if not files:
-        return done, False
+        return done, False, results
     n = workers if workers > 0 else (cpu_count() or 4)
     pool = ProcessPoolExecutor(max_workers=min(n, len(files)))
     broken = False
     futs = {
         pool.submit(_extract_job, src, outdir / kind_rel(src), images_only): src for src in files
     }
+
+    def _take(src: Path, name: str, count: int, err: str | None) -> None:
+        done.add(src)
+        results.append((src, count, err))
+        _log_extract(name, count, err)
+
     try:
         try:
             for fut in as_completed(futs):
@@ -323,8 +350,7 @@ def _consume(files: list[Path], outdir: Path, workers: int, images_only: bool = 
                 except BrokenProcessPool:
                     broken = True
                     break
-                done.add(src)
-                _log_extract(name, count, err)
+                _take(src, name, count, err)
         except BrokenProcessPool:
             broken = True
         for fut, src in futs.items():
@@ -334,30 +360,33 @@ def _consume(files: list[Path], outdir: Path, workers: int, images_only: bool = 
                 name, count, err = fut.result(timeout=0)
             except Exception:
                 continue
-            done.add(src)
-            _log_extract(name, count, err)
+            _take(src, name, count, err)
     finally:
         try:
             pool.shutdown(wait=not broken, cancel_futures=broken)
         except Exception:
             pass
-    return done, broken
+    return done, broken, results
 
 
-def extract_many(files: list[Path], outdir: Path, workers: int = 0, *, images_only: bool = False) -> None:
+def extract_many(
+    files: list[Path], outdir: Path, workers: int = 0, *, images_only: bool = False
+) -> list[tuple[Path, int, str | None]]:
     pending = list(files)
     if not pending:
-        return
-    done, broken = _consume(pending, outdir, workers, images_only)
+        return []
+    done, broken, results = _consume(pending, outdir, workers, images_only)
     if not broken:
-        return
+        return results
     # ponytail: after one killed worker, the rest run one at a time
     pending = [src for src in pending if src not in done]
     logger.error("worker killed; retrying %d file(s) one at a time", len(pending))
     for src in pending:
-        _, one_broken = _consume([src], outdir, 1, images_only)
+        _, one_broken, one_results = _consume([src], outdir, 1, images_only)
+        results.extend(one_results)
         if one_broken:
             logger.error("%s killed the worker; skipped", src.name)
+    return results
 
 
 def main(args: argparse.Namespace) -> int:
@@ -374,7 +403,7 @@ def main(args: argparse.Namespace) -> int:
 if __name__ == "__main__":
     name, n, err = _extract_job(Path("_missing_no_such_file"), Path("."))
     assert err and n == 0 and name == "_missing_no_such_file"
-    extract_many([], Path("."))
+    assert extract_many([], Path(".")) == []
     assert asset_bucket("adv_anime_01_01_01-01") == "adv"
     assert asset_bucket("VisionProject.acf") == "_"
     assert kind_rel(Path("assets/assetbundles/adv/adv_anime_01_01_01-01")) == Path(
