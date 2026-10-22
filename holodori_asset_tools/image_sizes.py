@@ -143,6 +143,10 @@ LAYOUTS = (
     # ResourceDetail's size-switch values; other screens use slightly different ratios.
     ImageLayout("img_emb_m_", ((1024, 512),), (578, 271), "UserEmblemCellView._cellSizeChange"),
     ImageLayout("img_emb_l_", ((1024, 256),), (884, 272), "UserEmblemCellView._cellSizeChange"),
+    ImageLayout("img_marathon_event_normal_bg", ((2048, 1024),), (1920, 1080), "confirmed 1920x1080", True),
+    ImageLayout("img_marathon_event_normal_top", ((2048, 1024),), (1920, 1080), "confirmed 1920x1080", True),
+    ImageLayout("img_marathon_event_relay_bg", ((2048, 1024),), (1920, 1080), "confirmed 1920x1080", True),
+    ImageLayout("img_marathon_event_relay_top", ((2048, 1024),), (1920, 1080), "confirmed 1920x1080", True),
 )
 
 

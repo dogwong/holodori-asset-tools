@@ -53,7 +53,7 @@ their input.
 
 Image export restores Sprite logical canvases, including atlas scaling and trimmed
 transparent margins. Explicit bundle canvas metadata takes priority for textures;
-32 UI category rules cover cards, MV slides, banners, emblems and other images.
+36 UI category rules cover cards, MV slides, banners, emblems, marathon event art and other images.
 Full cards use the 1920x1080 UI reference canvas. Aspect-only rules preserve the
 source's longest dimension. Unverified textures retain native dimensions.
 These UI references do not establish original artwork resolution.
